@@ -3,7 +3,6 @@
 import os
 import numpy as np
 from easydict import EasyDict as edict
-from mytoken import token
 
 config = edict()
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"          ##if u use muti gpu set them visiable there and then set config.TRAIN.num_gpu
@@ -11,11 +10,11 @@ config = edict()
 config.TRAIN = edict()
 
 #### below are params for dataiter
-config.TRAIN.process_num = 1                      ### process_num for data provider
-config.TRAIN.prefetch_size = 1                  ### prefect Q size for data provider
+config.TRAIN.process_num = 3                      ### process_num for data provider
+config.TRAIN.prefetch_size = 100                  ### prefect Q size for data provider
 
 config.TRAIN.num_gpu = 1                        ##match with   os.environ["CUDA_VISIBLE_DEVICES"]
-config.TRAIN.batch_size = 1                    ###A big batch size may achieve a better result, but the memory is a problem
+config.TRAIN.batch_size = 16                    ###A big batch size may achieve a better result, but the memory is a problem
 config.TRAIN.log_interval = 10
 config.TRAIN.epoch = 20   ###just keep training , evaluation shoule be take care by yourself,
 config.TRAIN.epoch_start = 1
@@ -112,13 +111,13 @@ config.ANCHOR.achor=Anchor()
 
 # ##mobilenet as basemodel, mobile naet is not that fast
 config.MODEL = edict()
-config.MODEL.continue_train=True ### revover from a trained model
+config.MODEL.continue_train=False ### revover from a trained model
 config.MODEL.model_path = './vgg_base_2_classes_imagenet_fix__3/'  # save directory
 
 config.MODEL.net_structure='vgg_16' ######'resnet_v1_50,resnet_v1_101,MobilenetV2
 config.MODEL.l2_norm=[10,8,5]
 
-config.MODEL.pretrained_model='./vgg_base_2_classes_imagenet_fix__3/epoch_18L2_0.0005.ckpt'
+config.MODEL.pretrained_model='vgg_16.ckpt'
 config.MODEL.fpn_dims=[96,96,288,160,256,256]
 config.MODEL.fem_dims=256
 

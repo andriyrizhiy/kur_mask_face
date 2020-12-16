@@ -13,12 +13,12 @@ from tensorpack.dataflow import DataFromGenerator
 from  lib.dataset.dataietr import DataIter, DsfdDataIter
 from lib.core.model.net.ssd import DSFD
 from train_config import config as cfg
+from train_config import token
 
 
 from lib.BoundingBox import *
 from lib.BoundingBoxes import *
 from lib.Evaluator import *
-
 
 import numpy as np
 from mean_average_precision import MetricBuilder
@@ -29,7 +29,7 @@ metric_fn = MetricBuilder.build_evaluation_metric("map_2d", async_mode=True, num
 import neptune
 
 neptune.init(project_qualified_name='rizhiy/kkk',
-             api_token='eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vdWkubmVwdHVuZS5haSIsImFwaV91cmwiOiJodHRwczovL3VpLm5lcHR1bmUuYWkiLCJhcGlfa2V5IjoiYWU3MjljZWYtZjkxZS00NTY5LWEwN2MtMjk2ZGI2OWJjNDA5In0=',
+             api_token=token,
              )
 
 from lib.helper.logger import logger
@@ -41,6 +41,7 @@ class trainner():
 
         self.val_metric_gen = DsfdDataIter(cfg.DATA.root_path,cfg.DATA.val_txt_path,training_flag=False)
         self.train_metric_gen = DsfdDataIter(cfg.DATA.root_path,cfg.DATA.train_txt_path,training_flag=False)
+        self.trainds_for_eval =  DataIter(cfg.DATA.root_path,cfg.DATA.train_txt_path,training_flag=False)
 
         self.inputs=[]
         self.outputs=[]
@@ -99,9 +100,10 @@ class trainner():
                 print(variables_restore)
 
                 variables_restore_n = [v for v in variables_restore if
-                                       'GN' not in v.name and 'BatchNorm/beta' not in v.name and 'BatchNorm/gamma' not in v.name
-                                       and 'BatchNorm/moving_mean' not in v.name and 'BatchNorm/moving_variance' not in v.name]  # Conv2d_1c_1x1 Bottleneck
-                # print(variables_restore_n)
+                                       'GN' not in v.name]
+                                      # and 'BatchNorm/beta' not in v.name and 'BatchNorm/gamma' not in v.name
+                                      #  and 'BatchNorm/moving_mean' not in v.name and 'BatchNorm/moving_variance' not in v.name]  # Conv2d_1c_1x1 Bottleneck
+                print(variables_restore_n)
                 saver2 = tf.train.Saver(variables_restore_n)
                 saver2.restore(self.sess, cfg.MODEL.pretrained_model)
             else:
@@ -645,10 +647,12 @@ class trainner():
                 pred_n[:,1] = pred[:,0]
                 pred_n[:,2] = pred[:,3]
                 pred_n[:,3] = pred[:,2]
+                pred_n[:,4] = pred[:,4]
+                pred_n[:,5] = pred[:,5]
 
                 pred = pred_n
 
-                # pred = pred[pred[: , 5] > 0.5]
+                pred = pred[pred[: , 5] > 0.5]
 
                 examples = ds[step]
                 boxes = examples[1]
@@ -662,13 +666,85 @@ class trainner():
                 gt = np.append(gt, z, 1)
                 gt = gt[gt[:, 4] == 0]
 
-                metric_fn.add(pred, gt)
-                mAP = metric_fn.value(iou_thresholds=np.arange(0.5), mpolicy='soft')['mAP']
-                metric_fn.reset()
 
+                if len(pred) == 0 and len(gt) == 0:
+                    mAP = 1
+                else:
+                    metric_fn.add(pred, gt)
+                    mAP = metric_fn.value(iou_thresholds=np.arange(0.5))['mAP']
+                    metric_fn.reset()
                 running_mAP_05 += [mAP]
 
-                print(cfg.MODEL.model_path + ' metric mAP05: ', np.mean(running_mAP_05))
+            val_map = np.mean(running_mAP_05)
+
+            running_mAP_05 = []
+            ds = self.train_metric_gen
+
+            iter_n = cfg.TRAIN.train_set_size// cfg.TRAIN.num_gpu // cfg.TRAIN.batch_size
+            for step in tqdm.tqdm(range(iter_n)):
+
+                feed_dict = {}
+                examples = next(self.trainds_for_eval)
+                for n in range(cfg.TRAIN.num_gpu):
+                    feed_dict[self.inputs[0][n]] = examples[0][n * cfg.TRAIN.batch_size:(n + 1) * cfg.TRAIN.batch_size]
+                    feed_dict[self.inputs[1][n]] = examples[1][n * cfg.TRAIN.batch_size:(n + 1) * cfg.TRAIN.batch_size]
+                    feed_dict[self.inputs[2][n]] = examples[2][n * cfg.TRAIN.batch_size:(n + 1) * cfg.TRAIN.batch_size]
+
+                feed_dict[self.inputs[3]] = 0
+                feed_dict[self.inputs[4]] = False
+
+                total_loss_value, reg_loss_value, cla_loss_value, l2_loss_value, lr_value, result_network = \
+                    self.sess.run([*self.val_outputs],
+                                  feed_dict=feed_dict)
+
+                num_boxes = result_network['num_boxes']
+
+                boxes = np.reshape(result_network['boxes'], (-1, 4))
+                boxes *= examples[0].shape[1]
+                labels = np.reshape(result_network['labels'], (-1, 1))
+                scores = np.reshape(result_network['scores'], (-1, 1))
+
+                pred = np.append(boxes, labels, 1)
+                pred = np.append(pred, scores, 1)
+                pred = pred[pred[:, 4] == 0]
+
+                pred_n = np.zeros_like(pred)
+                pred_n[:, 0] = pred[:, 1]
+                pred_n[:, 1] = pred[:, 0]
+                pred_n[:, 2] = pred[:, 3]
+                pred_n[:, 3] = pred[:, 2]
+                pred_n[:, 4] = pred[:, 4]
+                pred_n[:, 5] = pred[:, 5]
+
+                pred = pred_n
+
+                pred = pred[pred[:, 5] > 0.5]
+
+                examples = ds[step]
+                boxes = examples[1]
+                labels = examples[2] - 1
+                boxes = np.reshape(boxes, (-1, 4))
+                labels = np.reshape(labels, (-1, 1))
+                z = np.zeros_like(labels)
+
+                gt = np.append(boxes, labels, 1)
+                gt = np.append(gt, z, 1)
+                gt = np.append(gt, z, 1)
+                gt = gt[gt[:, 4] == 0]
+
+                if len(pred) == 0 and len(gt) == 0:
+                    mAP = 1
+                else:
+                    metric_fn.add(pred, gt)
+                    mAP = metric_fn.value(iou_thresholds=np.arange(0.5))['mAP']
+                    metric_fn.reset()
+                running_mAP_05 += [mAP]
+
+            train_map = np.mean(running_mAP_05)
+            print(cfg.MODEL.model_path)
+            print('training metric mAP05: ', train_map)
+            print('validation metric mAP05: ', val_map)
+
             self.sess.close()
 
 
@@ -678,6 +754,17 @@ class trainner():
         self.load_weight()
 
         print("start evaluation")
+        dest_folder = os.path.join('samples_result', cfg.MODEL.model_path)
+        if not os.path.isdir(dest_folder):
+            os.mkdir(dest_folder)
+
+        gt_path = os.path.join(dest_folder,'img_gt')
+        if not os.path.isdir(gt_path):
+            os.mkdir(gt_path)
+
+        pred_path = os.path.join(dest_folder, 'img_pred')
+        if not os.path.isdir(pred_path):
+            os.mkdir(pred_path)
 
         with self._graph.as_default():
             # Create a saver.
@@ -735,44 +822,23 @@ class trainner():
                 img_full_gt = img_full.copy()
                 for box in gt:
                     xmin = int(box[0])
-                    xmax = int(box[2])
                     ymin = int(box[1])
+                    xmax = int(box[2])
                     ymax = int(box[3])
                     img_full_gt = cv2.rectangle(img_full_gt, (xmin, ymin), (xmax, ymax), (0,255,0), 2)
                 img_full_gt = cv2.cvtColor(img_full_gt, cv2.COLOR_BGR2RGB)
-                cv2.imwrite(f'samples_result/img_full_gt/{step}.png', img_full_gt)
+                cv2.imwrite(gt_path + f'/{step}.png', img_full_gt)
 
                 img_from_gen_gt = img_from_gen.copy()
-                for box in gt:
-                    xmin = int(box[0])
-                    xmax = int(box[2])
-                    ymin = int(box[1])
-                    ymax = int(box[3])
-                    img_from_gen_gt = cv2.rectangle(img_from_gen_gt, (xmin, ymin), (xmax, ymax), (0,255,0), 2)
+                for box in pred:
+                    if box[5] > 0.5:
+                        xmin = int(box[1])
+                        ymin = int(box[0])
+                        xmax = int(box[3])
+                        ymax = int(box[2])
+                        img_from_gen_gt = cv2.rectangle(img_from_gen_gt, (xmin, ymin), (xmax, ymax), (0,255,0), 2)
                 img_from_gen_gt = cv2.cvtColor(img_from_gen_gt, cv2.COLOR_BGR2RGB)
-                cv2.imwrite(f'samples_result/img_from_gen_gt/{step}.png', img_from_gen_gt)
-
-                img_full_pred = img_full.copy()
-                for box in pred:
-                    if box[5] > 0.5:
-                        xmin = int(box[1])
-                        xmax = int(box[3])
-                        ymin = int(box[0])
-                        ymax = int(box[2])
-                        img_full_pred = cv2.rectangle(img_full_pred, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                img_full_pred = cv2.cvtColor(img_full_pred, cv2.COLOR_BGR2RGB)
-                cv2.imwrite(f'samples_result/img_full_pred/{step}.png', img_full_pred)
-
-                img_from_gen_pred = img_from_gen.copy()
-                for box in pred:
-                    if box[5] > 0.5:
-                        xmin = int(box[1])
-                        xmax = int(box[3])
-                        ymin = int(box[0])
-                        ymax = int(box[2])
-                        img_from_gen_pred = cv2.rectangle(img_from_gen_pred, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                img_from_gen_pred = cv2.cvtColor(img_from_gen_pred, cv2.COLOR_BGR2RGB)
-                cv2.imwrite(f'samples_result/img_from_gen_pred/{step}.png', img_from_gen_pred)
+                cv2.imwrite(pred_path + f'/{step}.png', img_from_gen_gt)
 
             self.sess.close()
 
